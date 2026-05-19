@@ -1,3 +1,4 @@
+mod commands;
 mod resp;
 mod server;
 
