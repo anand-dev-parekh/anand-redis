@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -6,10 +6,18 @@ use std::time::Instant;
 use crate::resp::Value;
 
 pub mod generic;
+pub mod list;
 pub mod string;
 
+/// Keys are typed in Redis, so every command that reads a value has to decide
+/// what to do when it finds the wrong kind — see `CmdError::WrongType`.
+pub enum Data {
+    String(Vec<u8>),
+    List(VecDeque<Vec<u8>>),
+}
+
 pub struct Entry {
-    pub value: Vec<u8>,
+    pub value: Data,
     pub expires_at: Option<Instant>,
 }
 
@@ -29,6 +37,7 @@ pub enum CmdError {
     Protocol(&'static str),
     NotAnInteger,
     Overflow,
+    WrongType,
 }
 
 impl fmt::Display for CmdError {
@@ -44,6 +53,10 @@ impl fmt::Display for CmdError {
             CmdError::Protocol(msg) => write!(f, "ERR {msg}"),
             CmdError::NotAnInteger => write!(f, "ERR value is not an integer or out of range"),
             CmdError::Overflow => write!(f, "ERR increment or decrement would overflow"),
+            CmdError::WrongType => write!(
+                f,
+                "WRONGTYPE Operation against a key holding the wrong kind of value"
+            ),
         }
     }
 }
@@ -82,6 +95,9 @@ fn run(value: Value, db: &Db) -> CmdResult {
         b"SET" => string::set(args, db),
         b"INCR" => string::incr_by(args, db, 1),
         b"DECR" => string::incr_by(args, db, -1),
+        b"LPUSH" => list::push(args, db, list::Side::Left),
+        b"RPUSH" => list::push(args, db, list::Side::Right),
+        b"LRANGE" => list::lrange(args, db),
         other => Err(CmdError::UnknownCommand(
             String::from_utf8_lossy(other).into_owned(),
         )),
@@ -108,4 +124,12 @@ pub(crate) fn is_expired(entry: &Entry) -> bool {
     entry
         .expires_at
         .is_some_and(|deadline| Instant::now() > deadline)
+}
+
+/// Write paths do evict, so a read-modify-write command starts from a clean slate
+/// rather than resurrecting a key that should already be gone.
+pub(crate) fn evict_if_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
+    if store.get(key).is_some_and(is_expired) {
+        store.remove(key);
+    }
 }

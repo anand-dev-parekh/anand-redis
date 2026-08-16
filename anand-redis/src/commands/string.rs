@@ -1,23 +1,28 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::{CmdError, CmdResult, Db, Entry, arity, is_expired};
+use super::{CmdError, CmdResult, Data, Db, Entry, arity, evict_if_expired, is_expired};
 use crate::resp::Value;
 
 pub fn get(args: &[Vec<u8>], db: &Db) -> CmdResult {
     arity(args, 1, Some(1), "get")?;
     let store = db.read().unwrap();
     match store.get(&args[0]) {
-        Some(entry) if !is_expired(entry) => Ok(Value::BulkString(entry.value.clone())),
+        Some(entry) if !is_expired(entry) => match &entry.value {
+            Data::String(bytes) => Ok(Value::BulkString(bytes.clone())),
+            Data::List(_) => Err(CmdError::WrongType),
+        },
         _ => Ok(Value::Null),
     }
 }
 
 pub fn set(args: &[Vec<u8>], db: &Db) -> CmdResult {
     arity(args, 2, None, "set")?;
+
     let entry = Entry {
-        value: args[1].clone(),
+        value: Data::String(args[1].clone()),
         expires_at: parse_expiry(&args[2..])?,
     };
+
     db.write().unwrap().insert(args[0].clone(), entry);
     Ok(Value::SimpleString("OK".to_string()))
 }
@@ -29,24 +34,25 @@ pub fn incr_by(args: &[Vec<u8>], db: &Db, delta: i64) -> CmdResult {
     let mut store = db.write().unwrap();
     let key = &args[0];
 
-    if store.get(key).is_some_and(is_expired) {
-        store.remove(key);
-    }
+    evict_if_expired(&mut store, key);
 
     let entry = store.entry(key.clone()).or_insert_with(|| Entry {
-        value: b"0".to_vec(),
+        value: Data::String(b"0".to_vec()),
         expires_at: None,
     });
 
-    let current: i64 = std::str::from_utf8(&entry.value)
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .ok_or(CmdError::NotAnInteger)?;
+    let current: i64 = match &entry.value {
+        Data::String(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .ok_or(CmdError::NotAnInteger)?,
+        Data::List(_) => return Err(CmdError::WrongType),
+    };
 
     let next = current.checked_add(delta).ok_or(CmdError::Overflow)?;
 
     // Assign to `value` only — replacing the whole Entry would wipe the TTL.
-    entry.value = next.to_string().into_bytes();
+    entry.value = Data::String(next.to_string().into_bytes());
 
     Ok(Value::Integer(next))
 }
