@@ -9,7 +9,17 @@ use crate::commands::{self, Db};
 use crate::resp;
 
 pub async fn run() -> std::io::Result<()> {
-    let db: Db = Arc::new(RwLock::new(HashMap::new()));
+    // Loading before the bind means no client can ever observe a half-filled store.
+    // A damaged dump costs us the data, not the server.
+    let store = match commands::persistence::load().await {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!("Failed to load dump.rdb: {err} — starting with an empty database");
+            HashMap::new()
+        }
+    };
+
+    let db: Db = Arc::new(RwLock::new(store));
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
     println!("Listening on 127.0.0.1:6379");
 
