@@ -1,6 +1,9 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use super::{CmdError, CmdResult, Data, Db, Entry, arity, evict_if_expired, is_expired};
+use super::{
+    CmdError, CmdResult, Data, Db, Entry, arity, evict_if_expired, is_expired,
+    unix_millis_to_instant, unix_secs_to_instant,
+};
 use crate::resp::Value;
 
 pub fn get(args: &[Vec<u8>], db: &Db) -> CmdResult {
@@ -94,23 +97,4 @@ fn parse_expiry(options: &[Vec<u8>]) -> Result<Option<Instant>, CmdError> {
     }
 
     Ok(expires_at)
-}
-
-fn unix_secs_to_instant(unix_secs: u64) -> Instant {
-    instant_from(UNIX_EPOCH + Duration::from_secs(unix_secs))
-}
-
-fn unix_millis_to_instant(unix_ms: u64) -> Instant {
-    instant_from(UNIX_EPOCH + Duration::from_millis(unix_ms))
-}
-
-/// Expiries are stored as monotonic `Instant`s, so an absolute wall-clock target
-/// has to be rebased against the current time. Targets already in the past
-/// collapse to now, meaning the key expires immediately.
-fn instant_from(target: SystemTime) -> Instant {
-    let now = Instant::now();
-    match target.duration_since(SystemTime::now()) {
-        Ok(remaining) => now + remaining,
-        Err(_) => now,
-    }
 }

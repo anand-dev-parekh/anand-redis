@@ -1,12 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::resp::Value;
 
 pub mod generic;
 pub mod list;
+pub mod persistence;
 pub mod string;
 
 /// Keys are typed in Redis, so every command that reads a value has to decide
@@ -38,6 +39,15 @@ pub enum CmdError {
     NotAnInteger,
     Overflow,
     WrongType,
+    Io(String),
+}
+
+/// `SAVE` is the only command that touches the filesystem, so a failed write has
+/// to reach the client as a normal command error rather than killing the loop.
+impl From<std::io::Error> for CmdError {
+    fn from(err: std::io::Error) -> Self {
+        CmdError::Io(err.to_string())
+    }
 }
 
 impl fmt::Display for CmdError {
@@ -57,6 +67,7 @@ impl fmt::Display for CmdError {
                 f,
                 "WRONGTYPE Operation against a key holding the wrong kind of value"
             ),
+            CmdError::Io(msg) => write!(f, "ERR {msg}"),
         }
     }
 }
@@ -98,6 +109,7 @@ fn run(value: Value, db: &Db) -> CmdResult {
         b"LPUSH" => list::push(args, db, list::Side::Left),
         b"RPUSH" => list::push(args, db, list::Side::Right),
         b"LRANGE" => list::lrange(args, db),
+        b"SAVE" => persistence::save(args, db),
         other => Err(CmdError::UnknownCommand(
             String::from_utf8_lossy(other).into_owned(),
         )),
@@ -132,4 +144,33 @@ pub(crate) fn evict_if_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) 
     if store.get(key).is_some_and(is_expired) {
         store.remove(key);
     }
+}
+
+pub(crate) fn unix_secs_to_instant(unix_secs: u64) -> Instant {
+    instant_from(UNIX_EPOCH + Duration::from_secs(unix_secs))
+}
+
+pub(crate) fn unix_millis_to_instant(unix_ms: u64) -> Instant {
+    instant_from(UNIX_EPOCH + Duration::from_millis(unix_ms))
+}
+
+/// Expiries are stored as monotonic `Instant`s, so an absolute wall-clock target
+/// has to be rebased against the current time. Targets already in the past
+/// collapse to now, meaning the key expires immediately.
+fn instant_from(target: SystemTime) -> Instant {
+    let now = Instant::now();
+    match target.duration_since(SystemTime::now()) {
+        Ok(remaining) => now + remaining,
+        Err(_) => now,
+    }
+}
+
+/// The inverse, for `SAVE`: an `Instant` means nothing to the next process, so a
+/// deadline is rebased back onto the wall clock. Deadlines already in the past
+/// saturate to now, which reloads as an immediate expiry.
+pub(crate) fn unix_millis_from(deadline: Instant) -> u64 {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (SystemTime::now() + remaining)
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.as_millis() as u64)
 }
