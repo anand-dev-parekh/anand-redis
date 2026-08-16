@@ -22,6 +22,35 @@ pub fn set(args: &[Vec<u8>], db: &Db) -> CmdResult {
     Ok(Value::SimpleString("OK".to_string()))
 }
 
+pub fn incr_by(args: &[Vec<u8>], db: &Db, delta: i64) -> CmdResult {
+    let name = if delta > 0 { "incr" } else { "decr" };
+    arity(args, 1, Some(1), name)?;
+
+    let mut store = db.write().unwrap();
+    let key = &args[0];
+
+    if store.get(key).is_some_and(is_expired) {
+        store.remove(key);
+    }
+
+    let entry = store.entry(key.clone()).or_insert_with(|| Entry {
+        value: b"0".to_vec(),
+        expires_at: None,
+    });
+
+    let current: i64 = std::str::from_utf8(&entry.value)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .ok_or(CmdError::NotAnInteger)?;
+
+    let next = current.checked_add(delta).ok_or(CmdError::Overflow)?;
+
+    // Assign to `value` only — replacing the whole Entry would wipe the TTL.
+    entry.value = next.to_string().into_bytes();
+
+    Ok(Value::Integer(next))
+}
+
 fn parse_expiry(options: &[Vec<u8>]) -> Result<Option<Instant>, CmdError> {
     let mut expires_at = None;
     let mut i = 0;

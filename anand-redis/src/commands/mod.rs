@@ -27,6 +27,8 @@ pub enum CmdError {
     UnknownOption(String),
     UnknownCommand(String),
     Protocol(&'static str),
+    NotAnInteger,
+    Overflow,
 }
 
 impl fmt::Display for CmdError {
@@ -40,6 +42,8 @@ impl fmt::Display for CmdError {
             CmdError::UnknownOption(opt) => write!(f, "ERR unknown option '{opt}'"),
             CmdError::UnknownCommand(cmd) => write!(f, "ERR unknown command '{cmd}'"),
             CmdError::Protocol(msg) => write!(f, "ERR {msg}"),
+            CmdError::NotAnInteger => write!(f, "ERR value is not an integer or out of range"),
+            CmdError::Overflow => write!(f, "ERR increment or decrement would overflow"),
         }
     }
 }
@@ -76,6 +80,8 @@ fn run(value: Value, db: &Db) -> CmdResult {
         b"EXISTS" => generic::exists(args, db),
         b"GET" => string::get(args, db),
         b"SET" => string::set(args, db),
+        b"INCR" => string::incr_by(args, db, 1),
+        b"DECR" => string::incr_by(args, db, -1),
         other => Err(CmdError::UnknownCommand(
             String::from_utf8_lossy(other).into_owned(),
         )),
